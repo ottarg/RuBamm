@@ -36,7 +36,12 @@ To regenerate all visual equivalence plots in [`docs/plots/`](docs/plots/):
 
 ---
 
-## Visual Equivalence Benchmarks (PyBaMM vs. RuBaMM)
+## Visual Equivalence & Runtime Benchmarks (PyBaMM vs. RuBaMM)
+
+### Overall Runtime Comparison Across All Checkpoints
+Compares warm solver execution time (`solve()` vs `simulate()`) and end-to-end wall time (`Build + Solve` vs `Compile + Simulate`) across all checkpoints. Each individual checkpoint plot below also includes its own runtime bar chart at the bottom.
+
+![Overall Runtime Comparison](docs/plots/runtime_comparison.png)
 
 ### Checkpoint 1: Acausal Interfaces & Thevenin 1-RC Equivalent Circuit Model
 Compares `RuBaMM.EquivalentCircuit.Thevenin` against `pybamm.equivalent_circuit.Thevenin()` under 1C constant-current discharge and sinusoidal dynamic current profiles (`tests/test_cp1_interfaces_ecm.py`).

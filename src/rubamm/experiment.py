@@ -160,13 +160,13 @@ class Experiment:
         when_branches: list[str] = []
         for idx, step in enumerate(self.steps, start=1):
             if step.termination_type == "time":
-                cond = f"(time - pre(t_stage)) >= {step.termination_value:.12g}"
+                cond = f"(time - pre(t_stage)) >= (if pre(stage) == {idx} then {step.termination_value:.12g} else 1.0e12)"
             elif step.termination_type == "voltage_low":
-                cond = f"v <= {step.termination_value:.12g}"
+                cond = f"v <= (if pre(stage) == {idx} then {step.termination_value:.12g} else -100.0)"
             elif step.termination_type == "voltage_high":
-                cond = f"v >= {step.termination_value:.12g}"
+                cond = f"v >= (if pre(stage) == {idx} then {step.termination_value:.12g} else 100.0)"
             elif step.termination_type == "current_abs":
-                cond = f"abs(p.i) <= {step.termination_value:.12g} and (time - pre(t_stage)) >= 1.0"
+                cond = f"abs(p.i) <= (if pre(stage) == {idx} and (time - pre(t_stage)) >= 1.0 then {step.termination_value:.12g} else -100.0)"
             else:
                 raise ValueError(f"Unknown termination_type: {step.termination_type}")
 

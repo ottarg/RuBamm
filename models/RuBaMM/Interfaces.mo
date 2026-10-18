@@ -77,16 +77,16 @@ package Interfaces
     Integer stage(start = 1) "Active experiment stage (1..5)";
     Real t_stage(start = 0.0) "Timestamp when current stage started [s]";
   equation
-    when pre(stage) == 1 and v <= V_min then
+    when pre(stage) == 1 and v <= (if pre(stage) == 1 then V_min else -100.0) then
       stage = 2;
       t_stage = time;
-    elsewhen pre(stage) == 2 and (time - pre(t_stage)) >= t_rest1 then
+    elsewhen pre(stage) == 2 and (time - pre(t_stage)) >= (if pre(stage) == 2 then t_rest1 else 1.0e12) then
       stage = 3;
       t_stage = time;
-    elsewhen pre(stage) == 3 and v >= V_max then
+    elsewhen pre(stage) == 3 and v >= (if pre(stage) == 3 then V_max else 100.0) then
       stage = 4;
       t_stage = time;
-    elsewhen pre(stage) == 4 and ((time - pre(t_stage)) >= t_cv or (-p.i) <= I_cut) then
+    elsewhen pre(stage) == 4 and ((time - pre(t_stage)) >= (if pre(stage) == 4 then t_cv else 1.0e12) or (-p.i) <= (if pre(stage) == 4 and (time - pre(t_stage)) >= 1.0 then I_cut else -100.0)) then
       stage = 5;
       t_stage = time;
     end when;

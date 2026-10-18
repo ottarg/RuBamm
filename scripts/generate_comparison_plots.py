@@ -1,6 +1,7 @@
-"""Generate visual equivalence comparison plots with explicit residual/error subplots for all checkpoints."""
+"""Generate visual equivalence comparison plots with explicit residual/error subplots and runtime bar charts."""
 
 from pathlib import Path
+import time
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 import numpy as np
@@ -24,20 +25,66 @@ plt.rcParams.update(
     }
 )
 
+# Global registry collecting timing records across all checkpoints for the summary figure
+TIMING_RECORDS = []
 
-def _make_paired_figure(suptitle: str):
-    """Create a 2x2 grid of (main_ax, error_ax) vertical pairs."""
-    fig = plt.figure(figsize=(14, 11))
-    fig.suptitle(suptitle, fontweight="bold", fontsize=12.5, y=0.985)
+
+def _record_timing(label: str, pb_build_ms: float, pb_solve_ms: float, rm_compile_ms: float, rm_sim_ms: float):
+    rec = {
+        "label": label,
+        "pb_build_ms": pb_build_ms,
+        "pb_solve_ms": pb_solve_ms,
+        "pb_total_ms": pb_build_ms + pb_solve_ms,
+        "rm_compile_ms": rm_compile_ms,
+        "rm_sim_ms": rm_sim_ms,
+        "rm_total_ms": rm_compile_ms + rm_sim_ms,
+    }
+    TIMING_RECORDS.append(rec)
+    return rec
+
+
+def _time_pybamm(make_sim_fn, solve_fn):
+    """Time PyBaMM model construction/compilation vs warm solve time in milliseconds."""
+    t0 = time.perf_counter()
+    sim = make_sim_fn()
+    sol_first = solve_fn(sim)
+    t_first_total = (time.perf_counter() - t0) * 1e3
+
+    # Warm solve (pure solver execution without model build & CasADi codegen)
+    t1 = time.perf_counter()
+    sol = solve_fn(sim)
+    t_solve = (time.perf_counter() - t1) * 1e3
+    t_build = max(0.0, t_first_total - t_solve)
+    return sol, t_build, t_solve
+
+
+def _time_rumoca(compile_fn, sim_fn):
+    """Time Rumoca model compilation vs warm simulation time in milliseconds."""
+    t0 = time.perf_counter()
+    rm_model = compile_fn()
+    t_compile = (time.perf_counter() - t0) * 1e3
+
+    # Warm simulation
+    _ = sim_fn(rm_model)
+    t1 = time.perf_counter()
+    rm_res = sim_fn(rm_model)
+    t_sim = (time.perf_counter() - t1) * 1e3
+    return rm_res, t_compile, t_sim
+
+
+def _make_paired_figure_with_runtime(suptitle: str):
+    """Create a 2x2 grid of (main_ax, error_ax) vertical pairs plus a bottom runtime comparison bar chart."""
+    fig = plt.figure(figsize=(14, 13.5))
+    fig.suptitle(suptitle, fontweight="bold", fontsize=12.5, y=0.988)
     gs = GridSpec(
-        4,
+        5,
         2,
         figure=fig,
-        height_ratios=[2.1, 1.0, 2.1, 1.0],
-        hspace=0.32,
+        height_ratios=[2.0, 0.95, 2.0, 0.95, 1.35],
+        hspace=0.36,
         wspace=0.24,
-        top=0.93,
-        bottom=0.05,
+        top=0.94,
+        bottom=0.045,
         left=0.07,
         right=0.97,
     )
@@ -48,7 +95,52 @@ def _make_paired_figure(suptitle: str):
             ax_err = fig.add_subplot(gs[row_pair + 1, col], sharex=ax_main)
             ax_err.axhline(0.0, color="k", ls=":", lw=0.9, alpha=0.7)
             pairs.append((ax_main, ax_err))
-    return fig, pairs
+    ax_runtime = fig.add_subplot(gs[4, :])
+    return fig, pairs, ax_runtime
+
+
+def _plot_runtime_bars(ax, records, title="Runtime Comparison: PyBaMM vs RuBaMM (Rumoca)"):
+    """Plot grouped stacked/side-by-side runtime comparison bars on `ax`."""
+    labels = [r["label"] for r in records]
+    n = len(records)
+    x = np.arange(n)
+    width = 0.18
+
+    pb_build = np.array([r["pb_build_ms"] for r in records])
+    pb_solve = np.array([r["pb_solve_ms"] for r in records])
+    pb_total = np.array([r["pb_total_ms"] for r in records])
+
+    rm_comp = np.array([r["rm_compile_ms"] for r in records])
+    rm_sim = np.array([r["rm_sim_ms"] for r in records])
+    rm_total = np.array([r["rm_total_ms"] for r in records])
+
+    b1 = ax.bar(x - 1.5 * width, pb_solve, width, color="#2b2b2b", label="PyBaMM Solve [ms]")
+    b2 = ax.bar(x - 0.5 * width, rm_sim, width, color="#e63946", label="RuBaMM Simulate [ms]")
+    b3 = ax.bar(x + 0.5 * width, pb_total, width, color="#7f8c8d", label="PyBaMM Total (Build+Solve) [ms]")
+    b4 = ax.bar(x + 1.5 * width, rm_total, width, color="#f4a261", label="RuBaMM Total (Compile+Sim) [ms]")
+
+    max_h = max(np.max(pb_total), np.max(rm_total))
+    ax.set_ylim(0, max_h * 1.45)
+
+    for bars in (b1, b2, b3, b4):
+        for bar in bars:
+            h = bar.get_height()
+            ax.annotate(
+                f"{h:.1f} ms",
+                xy=(bar.get_x() + bar.get_width() / 2, h),
+                xytext=(0, 3),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=8.0,
+                fontweight="bold",
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontweight="bold")
+    ax.set_ylabel("Wall Time [ms]")
+    ax.set_title(title, fontweight="bold")
+    ax.legend(ncol=4, loc="upper right")
 
 
 def _ocv_thevenin_pybamm(z):
@@ -56,28 +148,28 @@ def _ocv_thevenin_pybamm(z):
 
 
 def plot_cp1_thevenin_ecm():
-    print("Generating CP1: Thevenin ECM comparison + error plots...")
-    pybamm_model = pybamm.equivalent_circuit.Thevenin()
-    params = pybamm_model.default_parameter_values.copy()
-    params.update(
-        {
-            "Cell capacity [A.h]": 100.0,
-            "Initial SoC": 0.8,
-            "Current function [A]": 100.0,
-            "R0 [Ohm]": 0.001,
-            "R1 [Ohm]": 0.0005,
-            "C1 [F]": 10000.0,
-            "Element-1 initial overpotential [V]": 0.0,
-            "Entropic change [V/K]": -0.0001,
-            "Open-circuit voltage [V]": _ocv_thevenin_pybamm,
-        }
-    )
+    print("Generating CP1: Thevenin ECM comparison + error + runtime plots...")
     t_cc = np.linspace(0.0, 1800.0, 181)
-    sol_cc = pybamm.Simulation(
-        pybamm_model,
-        parameter_values=params,
-        solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8),
-    ).solve(t_cc, t_interp=t_cc)
+
+    def make_pb_cc():
+        m = pybamm.equivalent_circuit.Thevenin()
+        p = m.default_parameter_values.copy()
+        p.update(
+            {
+                "Cell capacity [A.h]": 100.0,
+                "Initial SoC": 0.8,
+                "Current function [A]": 100.0,
+                "R0 [Ohm]": 0.001,
+                "R1 [Ohm]": 0.0005,
+                "C1 [F]": 10000.0,
+                "Element-1 initial overpotential [V]": 0.0,
+                "Entropic change [V/K]": -0.0001,
+                "Open-circuit voltage [V]": _ocv_thevenin_pybamm,
+            }
+        )
+        return pybamm.Simulation(m, parameter_values=p, solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8))
+
+    sol_cc, pb_b_cc, pb_s_cc = _time_pybamm(make_pb_cc, lambda s: s.solve(t_cc, t_interp=t_cc))
 
     system_cc = """
     model PlotTheveninCC
@@ -93,27 +185,33 @@ def plot_cp1_thevenin_ecm():
       connect(cell.n, gnd.p);
     end PlotTheveninCC;
     """
-    rm_cc = compile_system(system_cc, model_name="PlotTheveninCC").simulate(
-        t=(0.0, 1800.0), dt=10.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)
+    rm_cc, rm_c_cc, rm_s_cc = _time_rumoca(
+        lambda: compile_system(system_cc, model_name="PlotTheveninCC"),
+        lambda m: m.simulate(t=(0.0, 1800.0), dt=10.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)),
     )
+    rec_cc = _record_timing("CP1: Thevenin 1C CC", pb_b_cc, pb_s_cc, rm_c_cc, rm_s_cc)
 
-    params_dyn = params.copy()
-    params_dyn.update(
-        {
-            "Initial SoC": 0.6,
-            "Current function [A]": lambda t: 50.0 + 40.0 * pybamm.sin(0.02 * t),
-            "R0 [Ohm]": 0.0015,
-            "R1 [Ohm]": 0.0008,
-            "C1 [F]": 5000.0,
-            "Entropic change [V/K]": 0.0,
-        }
-    )
     t_dyn = np.linspace(0.0, 600.0, 121)
-    sol_dyn = pybamm.Simulation(
-        pybamm_model,
-        parameter_values=params_dyn,
-        solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8),
-    ).solve(t_dyn, t_interp=t_dyn)
+
+    def make_pb_dyn():
+        m = pybamm.equivalent_circuit.Thevenin()
+        p = m.default_parameter_values.copy()
+        p.update(
+            {
+                "Cell capacity [A.h]": 100.0,
+                "Initial SoC": 0.6,
+                "Current function [A]": lambda t: 50.0 + 40.0 * pybamm.sin(0.02 * t),
+                "R0 [Ohm]": 0.0015,
+                "R1 [Ohm]": 0.0008,
+                "C1 [F]": 5000.0,
+                "Element-1 initial overpotential [V]": 0.0,
+                "Entropic change [V/K]": 0.0,
+                "Open-circuit voltage [V]": _ocv_thevenin_pybamm,
+            }
+        )
+        return pybamm.Simulation(m, parameter_values=p, solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8))
+
+    sol_dyn, pb_b_dyn, pb_s_dyn = _time_pybamm(make_pb_dyn, lambda s: s.solve(t_dyn, t_interp=t_dyn))
 
     system_dyn = """
     model PlotTheveninDyn
@@ -129,12 +227,14 @@ def plot_cp1_thevenin_ecm():
       connect(cell.n, gnd.p);
     end PlotTheveninDyn;
     """
-    rm_dyn = compile_system(system_dyn, model_name="PlotTheveninDyn").simulate(
-        t=(0.0, 600.0), dt=5.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)
+    rm_dyn, rm_c_dyn, rm_s_dyn = _time_rumoca(
+        lambda: compile_system(system_dyn, model_name="PlotTheveninDyn"),
+        lambda m: m.simulate(t=(0.0, 600.0), dt=5.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)),
     )
+    rec_dyn = _record_timing("CP1: Thevenin Sine", pb_b_dyn, pb_s_dyn, rm_c_dyn, rm_s_dyn)
 
-    fig, pairs = _make_paired_figure(
-        "Checkpoint 1: Thevenin 1-RC Equivalent Circuit Model — Trajectories & Explicit Errors (RuBaMM - PyBaMM)"
+    fig, pairs, ax_rt = _make_paired_figure_with_runtime(
+        "Checkpoint 1: Thevenin 1-RC Equivalent Circuit Model — Trajectories, Explicit Errors & Runtimes"
     )
 
     # Pair 0: CC Voltage
@@ -197,12 +297,13 @@ def plot_cp1_thevenin_ecm():
     ax_e.set_xlabel("Time [s]")
     ax_e.legend(loc="upper right")
 
+    _plot_runtime_bars(ax_rt, [rec_cc, rec_dyn])
     fig.savefig(PLOTS_DIR / "cp1_thevenin_ecm.png")
     plt.close(fig)
 
 
 def plot_cp2_particle_ocp():
-    print("Generating CP2: Marquis2019 OCP & SphericalParticle FVM comparison + error plots...")
+    print("Generating CP2: Marquis2019 OCP & SphericalParticle FVM comparison + error + runtime plots...")
     param = pybamm.ParameterValues("Marquis2019")
     u_n_fn = param["Negative electrode OCP [V]"]
     u_p_fn = param["Positive electrode OCP [V]"]
@@ -223,9 +324,7 @@ def plot_cp2_particle_ocp():
       k_e = RuBaMM.Parameters.Marquis2019.kappa_e(c_e);
     end PlotMarquisFn;
     """
-    rm_fn = compile_system(system_fn, model_name="PlotMarquisFn").simulate(
-        t=(0.0, 0.96), dt=0.01
-    )
+    rm_fn = compile_system(system_fn, model_name="PlotMarquisFn").simulate(t=(0.0, 0.96), dt=0.01)
     sto = rm_fn["sto"]
     c_e = rm_fn["c_e"]
 
@@ -237,13 +336,15 @@ def plot_cp2_particle_ocp():
     k_e_pb = np.array([_ev(k_e_fn(c, 298.15)) for c in c_e])
 
     Nr = 10
-    pybamm_spm = pybamm.lithium_ion.SPM()
-    vp = pybamm_spm.default_var_pts.copy()
-    vp.update({"r_n": Nr, "r_p": Nr})
     t_eval = np.linspace(0.0, 3600.0, 181)
-    sol = pybamm.Simulation(
-        pybamm_spm, var_pts=vp, solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8)
-    ).solve(t_eval, t_interp=t_eval)
+
+    def make_pb_part():
+        m = pybamm.lithium_ion.SPM()
+        vp = m.default_var_pts.copy()
+        vp.update({"r_n": Nr, "r_p": Nr})
+        return pybamm.Simulation(m, var_pts=vp, solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8))
+
+    sol, pb_b_part, pb_s_part = _time_pybamm(make_pb_part, lambda s: s.solve(t_eval, t_interp=t_eval))
 
     system_part = f"""
     model PlotParticles
@@ -259,12 +360,14 @@ def plot_cp2_particle_ocp():
       pos_particle.j_flux = -P.I_typ / (P.F * P.a_p * P.L_p * P.A_cc);
     end PlotParticles;
     """
-    rm_part = compile_system(system_part, model_name="PlotParticles").simulate(
-        t=(0.0, 3600.0), dt=20.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)
+    rm_part, rm_c_part, rm_s_part = _time_rumoca(
+        lambda: compile_system(system_part, model_name="PlotParticles"),
+        lambda m: m.simulate(t=(0.0, 3600.0), dt=20.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)),
     )
+    rec_part = _record_timing("CP2: Particle FVM (Nr=10)", pb_b_part, pb_s_part, rm_c_part, rm_s_part)
 
-    fig, pairs = _make_paired_figure(
-        "Checkpoint 2: Marquis2019 Functions & 1D Spherical Particle FVM — Trajectories & Explicit Errors"
+    fig, pairs, ax_rt = _make_paired_figure_with_runtime(
+        "Checkpoint 2: Marquis2019 Functions & 1D Spherical Particle FVM — Trajectories, Errors & Runtimes"
     )
 
     # Pair 0: U_n and U_p
@@ -332,21 +435,23 @@ def plot_cp2_particle_ocp():
     ax_e.set_xlabel("Normalized Radius r / R_n [-]")
     ax_e.legend(loc="upper right", ncol=3, fontsize=7.5)
 
+    _plot_runtime_bars(ax_rt, [rec_part])
     fig.savefig(PLOTS_DIR / "cp2_particle_ocp.png")
     plt.close(fig)
 
 
 def plot_cp3_spm():
-    print("Generating CP3: Single Particle Model (SPM) comparison + error plots...")
+    print("Generating CP3: Single Particle Model (SPM) comparison + error + runtime plots...")
     Nr = 10
-    pybamm_spm = pybamm.lithium_ion.SPM()
-    vp = pybamm_spm.default_var_pts.copy()
-    vp.update({"r_n": Nr, "r_p": Nr})
-
     t_cc = np.linspace(0.0, 3400.0, 171)
-    sol_cc = pybamm.Simulation(
-        pybamm_spm, var_pts=vp, solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8)
-    ).solve(t_cc, t_interp=t_cc)
+
+    def make_pb_cc():
+        m = pybamm.lithium_ion.SPM()
+        vp = m.default_var_pts.copy()
+        vp.update({"r_n": Nr, "r_p": Nr})
+        return pybamm.Simulation(m, var_pts=vp, solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8))
+
+    sol_cc, pb_b_cc, pb_s_cc = _time_pybamm(make_pb_cc, lambda s: s.solve(t_cc, t_interp=t_cc))
 
     system_cc = f"""
     model PlotSPM1C
@@ -360,16 +465,23 @@ def plot_cp3_spm():
       connect(cell.n, gnd.p);
     end PlotSPM1C;
     """
-    rm_cc = compile_system(system_cc, model_name="PlotSPM1C").simulate(
-        t=(0.0, 3400.0), dt=20.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)
+    rm_cc, rm_c_cc, rm_s_cc = _time_rumoca(
+        lambda: compile_system(system_cc, model_name="PlotSPM1C"),
+        lambda m: m.simulate(t=(0.0, 3400.0), dt=20.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)),
     )
+    rec_cc = _record_timing("CP3: SPM 1C Discharge", pb_b_cc, pb_s_cc, rm_c_cc, rm_s_cc)
 
-    params_dyn = pybamm_spm.default_parameter_values.copy()
-    params_dyn["Current function [A]"] = lambda t: 0.4 + 0.6 * pybamm.sin(0.01 * t)
     t_dyn = np.linspace(0.0, 1200.0, 121)
-    sol_dyn = pybamm.Simulation(
-        pybamm_spm, parameter_values=params_dyn, var_pts=vp, solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8)
-    ).solve(t_dyn, t_interp=t_dyn)
+
+    def make_pb_dyn():
+        m = pybamm.lithium_ion.SPM()
+        vp = m.default_var_pts.copy()
+        vp.update({"r_n": Nr, "r_p": Nr})
+        p = m.default_parameter_values.copy()
+        p["Current function [A]"] = lambda t: 0.4 + 0.6 * pybamm.sin(0.01 * t)
+        return pybamm.Simulation(m, parameter_values=p, var_pts=vp, solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8))
+
+    sol_dyn, pb_b_dyn, pb_s_dyn = _time_pybamm(make_pb_dyn, lambda s: s.solve(t_dyn, t_interp=t_dyn))
 
     system_dyn = f"""
     model PlotSPMDyn
@@ -382,12 +494,14 @@ def plot_cp3_spm():
       connect(cell.n, gnd.p);
     end PlotSPMDyn;
     """
-    rm_dyn = compile_system(system_dyn, model_name="PlotSPMDyn").simulate(
-        t=(0.0, 1200.0), dt=10.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)
+    rm_dyn, rm_c_dyn, rm_s_dyn = _time_rumoca(
+        lambda: compile_system(system_dyn, model_name="PlotSPMDyn"),
+        lambda m: m.simulate(t=(0.0, 1200.0), dt=10.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)),
     )
+    rec_dyn = _record_timing("CP3: SPM Sine Load", pb_b_dyn, pb_s_dyn, rm_c_dyn, rm_s_dyn)
 
-    fig, pairs = _make_paired_figure(
-        "Checkpoint 3: Single Particle Model (SPM) — Trajectories & Explicit Errors (RuBaMM - PyBaMM)"
+    fig, pairs, ax_rt = _make_paired_figure_with_runtime(
+        "Checkpoint 3: Single Particle Model (SPM) — Trajectories, Explicit Errors & Runtimes"
     )
 
     # Pair 0: 1C Terminal Voltage
@@ -458,22 +572,24 @@ def plot_cp3_spm():
     ax_e.set_xlabel("Time [s]")
     ax_e.legend(loc="upper right", ncol=2)
 
+    _plot_runtime_bars(ax_rt, [rec_cc, rec_dyn])
     fig.savefig(PLOTS_DIR / "cp3_spm.png")
     plt.close(fig)
 
 
 def plot_cp4_spme():
-    print("Generating CP4: SPMe & 1D Electrolyte FVM comparison + error plots...")
+    print("Generating CP4: SPMe & 1D Electrolyte FVM comparison + error + runtime plots...")
     Nr = 8
     Nn, Ns, Np = 4, 3, 4
-    pybamm_spme = pybamm.lithium_ion.SPMe()
-    vp = pybamm_spme.default_var_pts.copy()
-    vp.update({"r_n": Nr, "r_p": Nr, "x_n": Nn, "x_s": Ns, "x_p": Np})
-
     t_eval = np.linspace(0.0, 3200.0, 161)
-    sol = pybamm.Simulation(
-        pybamm_spme, var_pts=vp, solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8)
-    ).solve(t_eval, t_interp=t_eval)
+
+    def make_pb_spme():
+        m = pybamm.lithium_ion.SPMe()
+        vp = m.default_var_pts.copy()
+        vp.update({"r_n": Nr, "r_p": Nr, "x_n": Nn, "x_s": Ns, "x_p": Np})
+        return pybamm.Simulation(m, var_pts=vp, solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8))
+
+    sol, pb_b_spme, pb_s_spme = _time_pybamm(make_pb_spme, lambda s: s.solve(t_eval, t_interp=t_eval))
 
     system_mo = f"""
     model PlotSPMe1C
@@ -487,12 +603,14 @@ def plot_cp4_spme():
       connect(cell.n, gnd.p);
     end PlotSPMe1C;
     """
-    rm_res = compile_system(system_mo, model_name="PlotSPMe1C").simulate(
-        t=(0.0, 3200.0), dt=20.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)
+    rm_res, rm_c_spme, rm_s_spme = _time_rumoca(
+        lambda: compile_system(system_mo, model_name="PlotSPMe1C"),
+        lambda m: m.simulate(t=(0.0, 3200.0), dt=20.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)),
     )
+    rec_spme = _record_timing("CP4: SPMe 1C Discharge", pb_b_spme, pb_s_spme, rm_c_spme, rm_s_spme)
 
-    fig, pairs = _make_paired_figure(
-        "Checkpoint 4: Single Particle Model with Electrolyte (SPMe) — Trajectories & Explicit Errors"
+    fig, pairs, ax_rt = _make_paired_figure_with_runtime(
+        "Checkpoint 4: Single Particle Model with Electrolyte (SPMe) — Trajectories, Errors & Runtimes"
     )
 
     # Pair 0: 1C Discharge Voltage
@@ -577,22 +695,24 @@ def plot_cp4_spme():
     ax_e.set_xlabel("Time [s]")
     ax_e.legend(loc="lower right", ncol=2)
 
+    _plot_runtime_bars(ax_rt, [rec_spme])
     fig.savefig(PLOTS_DIR / "cp4_spme.png")
     plt.close(fig)
 
 
 def plot_cp5_dfn():
-    print("Generating CP5: Full P2D Doyle-Fuller-Newman (DFN) comparison + error plots...")
+    print("Generating CP5: Full P2D Doyle-Fuller-Newman (DFN) comparison + error + runtime plots...")
     Nr = 6
     Nn, Ns, Np = 3, 2, 3
-    pybamm_dfn = pybamm.lithium_ion.DFN()
-    vp = pybamm_dfn.default_var_pts.copy()
-    vp.update({"r_n": Nr, "r_p": Nr, "x_n": Nn, "x_s": Ns, "x_p": Np})
-
     t_eval = np.linspace(0.0, 3000.0, 151)
-    sol = pybamm.Simulation(
-        pybamm_dfn, var_pts=vp, solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8)
-    ).solve(t_eval, t_interp=t_eval)
+
+    def make_pb_dfn():
+        m = pybamm.lithium_ion.DFN()
+        vp = m.default_var_pts.copy()
+        vp.update({"r_n": Nr, "r_p": Nr, "x_n": Nn, "x_s": Ns, "x_p": Np})
+        return pybamm.Simulation(m, var_pts=vp, solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8))
+
+    sol, pb_b_dfn, pb_s_dfn = _time_pybamm(make_pb_dfn, lambda s: s.solve(t_eval, t_interp=t_eval))
 
     system_mo = f"""
     model PlotDFN1C
@@ -606,12 +726,14 @@ def plot_cp5_dfn():
       connect(cell.n, gnd.p);
     end PlotDFN1C;
     """
-    rm_res = compile_system(system_mo, model_name="PlotDFN1C").simulate(
-        t=(0.0, 3000.0), dt=20.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)
+    rm_res, rm_c_dfn, rm_s_dfn = _time_rumoca(
+        lambda: compile_system(system_mo, model_name="PlotDFN1C"),
+        lambda m: m.simulate(t=(0.0, 3000.0), dt=20.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)),
     )
+    rec_dfn = _record_timing("CP5: DFN 1C Discharge", pb_b_dfn, pb_s_dfn, rm_c_dfn, rm_s_dfn)
 
-    fig, pairs = _make_paired_figure(
-        "Checkpoint 5: Doyle-Fuller-Newman P2D Model (DFN) — Trajectories & Explicit Errors (RuBaMM - PyBaMM)"
+    fig, pairs, ax_rt = _make_paired_figure_with_runtime(
+        "Checkpoint 5: Doyle-Fuller-Newman P2D Model (DFN) — Trajectories, Explicit Errors & Runtimes"
     )
 
     # Pair 0: Terminal Voltage
@@ -696,26 +818,29 @@ def plot_cp5_dfn():
     ax_e.set_xlabel("Time [s]")
     ax_e.legend(loc="upper right", ncol=3, fontsize=7.5)
 
+    _plot_runtime_bars(ax_rt, [rec_dfn])
     fig.savefig(PLOTS_DIR / "cp5_dfn.png")
     plt.close(fig)
 
 
 def plot_cp6_acausal_coupling():
-    print("Generating CP6: Acausal Subsystem Coupling comparison + error plots...")
+    print("Generating CP6: Acausal Subsystem Coupling comparison + error + runtime plots...")
     Nr = 6
     Nn, Ns, Np = 3, 2, 3
 
     # 1. Constant-Voltage Hold on DFN
     V_hold = 3.65
-    pybamm_cv = pybamm.lithium_ion.DFN(options={"operating mode": "voltage"})
-    vp = pybamm_cv.default_var_pts.copy()
-    vp.update({"r_n": Nr, "r_p": Nr, "x_n": Nn, "x_s": Ns, "x_p": Np})
-    params_cv = pybamm_cv.default_parameter_values.copy()
-    params_cv["Voltage function [V]"] = V_hold
     t_cv = np.linspace(0.0, 600.0, 61)
-    sol_cv = pybamm.Simulation(
-        pybamm_cv, parameter_values=params_cv, var_pts=vp, solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8)
-    ).solve(t_cv, t_interp=t_cv)
+
+    def make_pb_cv():
+        m = pybamm.lithium_ion.DFN(options={"operating mode": "voltage"})
+        vp = m.default_var_pts.copy()
+        vp.update({"r_n": Nr, "r_p": Nr, "x_n": Nn, "x_s": Ns, "x_p": Np})
+        p = m.default_parameter_values.copy()
+        p["Voltage function [V]"] = V_hold
+        return pybamm.Simulation(m, parameter_values=p, var_pts=vp, solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8))
+
+    sol_cv, pb_b_cv, pb_s_cv = _time_pybamm(make_pb_cv, lambda s: s.solve(t_cv, t_interp=t_cv))
 
     sys_cv = f"""
     model PlotDFNCV
@@ -728,19 +853,25 @@ def plot_cp6_acausal_coupling():
       connect(cell.n, gnd.p);
     end PlotDFNCV;
     """
-    rm_cv = compile_system(sys_cv, model_name="PlotDFNCV").simulate(
-        t=(0.0, 600.0), dt=10.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)
+    rm_cv, rm_c_cv, rm_s_cv = _time_rumoca(
+        lambda: compile_system(sys_cv, model_name="PlotDFNCV"),
+        lambda m: m.simulate(t=(0.0, 600.0), dt=10.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)),
     )
+    rec_cv = _record_timing("CP6: DFN Constant Voltage", pb_b_cv, pb_s_cv, rm_c_cv, rm_s_cv)
 
     # 2. Passive Resistor Load on DFN
     R_load = 5.0
-    pybamm_res = pybamm.lithium_ion.DFN(
-        options={"operating mode": lambda v: v["Current [A]"] - v["Terminal voltage [V]"] / R_load}
-    )
     t_res = np.linspace(0.0, 1200.0, 61)
-    sol_res = pybamm.Simulation(
-        pybamm_res, var_pts=vp, solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8)
-    ).solve(t_res, t_interp=t_res)
+
+    def make_pb_res():
+        m = pybamm.lithium_ion.DFN(
+            options={"operating mode": lambda v: v["Current [A]"] - v["Terminal voltage [V]"] / R_load}
+        )
+        vp = m.default_var_pts.copy()
+        vp.update({"r_n": Nr, "r_p": Nr, "x_n": Nn, "x_s": Ns, "x_p": Np})
+        return pybamm.Simulation(m, var_pts=vp, solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8))
+
+    sol_res, pb_b_res, pb_s_res = _time_pybamm(make_pb_res, lambda s: s.solve(t_res, t_interp=t_res))
 
     sys_res = f"""
     model PlotDFNRes
@@ -753,9 +884,11 @@ def plot_cp6_acausal_coupling():
       connect(cell.n, gnd.p);
     end PlotDFNRes;
     """
-    rm_res = compile_system(sys_res, model_name="PlotDFNRes").simulate(
-        t=(0.0, 1200.0), dt=20.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)
+    rm_res, rm_c_res, rm_s_res = _time_rumoca(
+        lambda: compile_system(sys_res, model_name="PlotDFNRes"),
+        lambda m: m.simulate(t=(0.0, 1200.0), dt=20.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)),
     )
+    rec_res = _record_timing("CP6: DFN Resistor Load", pb_b_res, pb_s_res, rm_c_res, rm_s_res)
 
     # 3. Parallel 2-Cell Pack Balancing
     sys_par = """
@@ -776,12 +909,13 @@ def plot_cp6_acausal_coupling():
       connect(pack_load.n, gnd.p);
     end PlotParallelCells;
     """
-    rm_par = compile_system(sys_par, model_name="PlotParallelCells").simulate(
-        t=(0.0, 1000.0), dt=10.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)
+    rm_par, _, _ = _time_rumoca(
+        lambda: compile_system(sys_par, model_name="PlotParallelCells"),
+        lambda m: m.simulate(t=(0.0, 1000.0), dt=10.0, config=rm.SimConfig(rtol=1e-8, atol=1e-8)),
     )
 
-    fig, pairs = _make_paired_figure(
-        "Checkpoint 6: Acausal Circuit & Multi-Cell Pack Coupling — Trajectories & Explicit Errors"
+    fig, pairs, ax_rt = _make_paired_figure_with_runtime(
+        "Checkpoint 6: Acausal Circuit & Multi-Cell Pack Coupling — Trajectories, Errors & Runtimes"
     )
 
     # Pair 0: DFN Constant Voltage Hold Current
@@ -850,6 +984,7 @@ def plot_cp6_acausal_coupling():
     ax_e.set_xlabel("Time [s]")
     ax_e.legend(loc="upper right")
 
+    _plot_runtime_bars(ax_rt, [rec_cv, rec_res])
     fig.savefig(PLOTS_DIR / "cp6_acausal_coupling.png")
     plt.close(fig)
 
@@ -888,7 +1023,7 @@ def _compute_stage_aligned_errors(sol_pb, rm_res):
 
 
 def plot_cp7_experiment():
-    print("Generating CP7: PyBaMM-style Experiment CCCV Recipe comparison + error plots...")
+    print("Generating CP7: PyBaMM-style Experiment CCCV Recipe comparison + error + runtime plots...")
     recipe = [
         "Discharge at 1C until 3.6 V",
         "Rest for 300 seconds",
@@ -898,57 +1033,71 @@ def plot_cp7_experiment():
 
     # 1. SPM Experiment
     Nr_spm = 8
-    pb_spm = pybamm.lithium_ion.SPM()
-    vp_spm = pb_spm.default_var_pts.copy()
-    vp_spm.update({"r_n": Nr_spm, "r_p": Nr_spm})
-    sol_spm = pybamm.Simulation(
-        pb_spm,
-        experiment=pybamm.Experiment(recipe, period="2 seconds"),
-        var_pts=vp_spm,
-        solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8),
-    ).solve()
 
-    rm_spm = compile_experiment(
-        cell_class="RuBaMM.Cells.SPM",
-        experiment=Experiment(recipe),
-        cell_params=f"Nr = {Nr_spm}",
-        model_name="PlotSPMExp",
-    ).simulate(
-        t=(0.0, float(sol_spm.t[-1])),
-        dt=5.0,
-        config=rm.SimConfig(rtol=1e-8, atol=1e-8),
+    def make_pb_spm_exp():
+        m = pybamm.lithium_ion.SPM()
+        vp = m.default_var_pts.copy()
+        vp.update({"r_n": Nr_spm, "r_p": Nr_spm})
+        return pybamm.Simulation(
+            m,
+            experiment=pybamm.Experiment(recipe, period="2 seconds"),
+            var_pts=vp,
+            solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8),
+        )
+
+    sol_spm, pb_b_spm, pb_s_spm = _time_pybamm(make_pb_spm_exp, lambda s: s.solve())
+
+    rm_spm, rm_c_spm, rm_s_spm = _time_rumoca(
+        lambda: compile_experiment(
+            cell_class="RuBaMM.Cells.SPM",
+            experiment=Experiment(recipe),
+            cell_params=f"Nr = {Nr_spm}",
+            model_name="PlotSPMExp",
+        ),
+        lambda m: m.simulate(
+            t=(0.0, float(sol_spm.t[-1])),
+            dt=5.0,
+            config=rm.SimConfig(rtol=1e-8, atol=1e-8),
+        ),
     )
-
+    rec_spm_exp = _record_timing("CP7: SPM 4-Stage CCCV", pb_b_spm, pb_s_spm, rm_c_spm, rm_s_spm)
     t_err_spm, v_err_spm, i_err_spm = _compute_stage_aligned_errors(sol_spm, rm_spm)
 
     # 2. DFN Experiment
     Nr_dfn = 6
     Nn, Ns, Np = 3, 2, 3
-    pb_dfn = pybamm.lithium_ion.DFN()
-    vp_dfn = pb_dfn.default_var_pts.copy()
-    vp_dfn.update({"r_n": Nr_dfn, "r_p": Nr_dfn, "x_n": Nn, "x_s": Ns, "x_p": Np})
-    sol_dfn = pybamm.Simulation(
-        pb_dfn,
-        experiment=pybamm.Experiment(recipe, period="2 seconds"),
-        var_pts=vp_dfn,
-        solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8),
-    ).solve()
 
-    rm_dfn = compile_experiment(
-        cell_class="RuBaMM.Cells.DFN",
-        experiment=Experiment(recipe),
-        cell_params=f"Nr = {Nr_dfn}, Nn = {Nn}, Ns = {Ns}, Np = {Np}",
-        model_name="PlotDFNExp",
-    ).simulate(
-        t=(0.0, float(sol_dfn.t[-1])),
-        dt=10.0,
-        config=rm.SimConfig(rtol=1e-8, atol=1e-8),
+    def make_pb_dfn_exp():
+        m = pybamm.lithium_ion.DFN()
+        vp = m.default_var_pts.copy()
+        vp.update({"r_n": Nr_dfn, "r_p": Nr_dfn, "x_n": Nn, "x_s": Ns, "x_p": Np})
+        return pybamm.Simulation(
+            m,
+            experiment=pybamm.Experiment(recipe, period="2 seconds"),
+            var_pts=vp,
+            solver=pybamm.IDAKLUSolver(rtol=1e-8, atol=1e-8),
+        )
+
+    sol_dfn, pb_b_dfn, pb_s_dfn = _time_pybamm(make_pb_dfn_exp, lambda s: s.solve())
+
+    rm_dfn, rm_c_dfn, rm_s_dfn = _time_rumoca(
+        lambda: compile_experiment(
+            cell_class="RuBaMM.Cells.DFN",
+            experiment=Experiment(recipe),
+            cell_params=f"Nr = {Nr_dfn}, Nn = {Nn}, Ns = {Ns}, Np = {Np}",
+            model_name="PlotDFNExp",
+        ),
+        lambda m: m.simulate(
+            t=(0.0, float(sol_dfn.t[-1])),
+            dt=10.0,
+            config=rm.SimConfig(rtol=1e-8, atol=1e-8),
+        ),
     )
-
+    rec_dfn_exp = _record_timing("CP7: DFN 4-Stage CCCV", pb_b_dfn, pb_s_dfn, rm_c_dfn, rm_s_dfn)
     t_err_dfn, v_err_dfn, i_err_dfn = _compute_stage_aligned_errors(sol_dfn, rm_dfn)
 
-    fig, pairs = _make_paired_figure(
-        "Checkpoint 7: Multi-Stage CCCV Experiment Recipe — Trajectories & Stage-Aligned Explicit Errors"
+    fig, pairs, ax_rt = _make_paired_figure_with_runtime(
+        "Checkpoint 7: Multi-Stage CCCV Experiment Recipe — Trajectories, Stage-Aligned Errors & Runtimes"
     )
 
     # Pair 0: SPM Voltage
@@ -999,7 +1148,76 @@ def plot_cp7_experiment():
     ax_e.set_xlabel("Time [s]")
     ax_e.legend(loc="upper right")
 
+    _plot_runtime_bars(ax_rt, [rec_spm_exp, rec_dfn_exp])
     fig.savefig(PLOTS_DIR / "cp7_experiment_cccv.png")
+    plt.close(fig)
+
+
+def plot_overall_runtime_summary():
+    print("Generating overall runtime comparison summary bar chart...")
+    fig, (ax_solve, ax_total) = plt.subplots(1, 2, figsize=(15, 7))
+    fig.suptitle(
+        "RuBaMM (Rumoca) vs PyBaMM (IDAKLU) Runtime Benchmark Summary Across All Checkpoints",
+        fontweight="bold",
+        fontsize=13,
+    )
+
+    labels = [r["label"] for r in TIMING_RECORDS]
+    y = np.arange(len(labels))
+    height = 0.36
+
+    pb_solve = np.array([r["pb_solve_ms"] for r in TIMING_RECORDS])
+    rm_sim = np.array([r["rm_sim_ms"] for r in TIMING_RECORDS])
+
+    pb_total = np.array([r["pb_total_ms"] for r in TIMING_RECORDS])
+    rm_total = np.array([r["rm_total_ms"] for r in TIMING_RECORDS])
+
+    # Left panel: Pure Solve / Simulate Time [ms] (log scale so both 1ms and 5000ms are clear)
+    b1 = ax_solve.barh(y - height / 2, pb_solve, height, color="#2b2b2b", label="PyBaMM Solve [ms]")
+    b2 = ax_solve.barh(y + height / 2, rm_sim, height, color="#e63946", label="RuBaMM Simulate [ms]")
+    ax_solve.set_xscale("log")
+    ax_solve.set_yticks(y)
+    ax_solve.set_yticklabels(labels, fontweight="bold")
+    ax_solve.invert_yaxis()
+    ax_solve.set_xlabel("Warm Solver Execution Time [ms] (log scale)")
+    ax_solve.set_title("Pure Solver Time: PyBaMM solve() vs RuBaMM simulate()", fontweight="bold")
+    ax_solve.set_xlim(left=0.3, right=max(np.max(pb_solve), np.max(rm_sim)) * 8.0)
+    for bar in list(b1) + list(b2):
+        w = bar.get_width()
+        ax_solve.annotate(
+            f" {w:.1f} ms",
+            xy=(w, bar.get_y() + bar.get_height() / 2),
+            va="center",
+            ha="left",
+            fontsize=8.0,
+            fontweight="bold",
+        )
+    ax_solve.legend(loc="upper right")
+
+    # Right panel: Total Wall Time (Build/Compile + Solve/Simulate) [ms]
+    b3 = ax_total.barh(y - height / 2, pb_total, height, color="#7f8c8d", label="PyBaMM Total (Build+Solve) [ms]")
+    b4 = ax_total.barh(y + height / 2, rm_total, height, color="#f4a261", label="RuBaMM Total (Compile+Sim) [ms]")
+    ax_total.set_xscale("log")
+    ax_total.set_yticks(y)
+    ax_total.set_yticklabels(["" for _ in labels])
+    ax_total.invert_yaxis()
+    ax_total.set_xlabel("Total Wall Time: Setup/Compile + Solve [ms] (log scale)")
+    ax_total.set_title("End-to-End Time: Build/Compile + Solve", fontweight="bold")
+    ax_total.set_xlim(left=1.0, right=max(np.max(pb_total), np.max(rm_total)) * 8.0)
+    for bar in list(b3) + list(b4):
+        w = bar.get_width()
+        ax_total.annotate(
+            f" {w:.1f} ms",
+            xy=(w, bar.get_y() + bar.get_height() / 2),
+            va="center",
+            ha="left",
+            fontsize=8.0,
+            fontweight="bold",
+        )
+    ax_total.legend(loc="upper right")
+
+    fig.tight_layout()
+    fig.savefig(PLOTS_DIR / "runtime_comparison.png")
     plt.close(fig)
 
 
@@ -1011,4 +1229,5 @@ if __name__ == "__main__":
     plot_cp5_dfn()
     plot_cp6_acausal_coupling()
     plot_cp7_experiment()
-    print(f"All comparison plots with explicit error panels saved to {PLOTS_DIR}")
+    plot_overall_runtime_summary()
+    print(f"All comparison plots with explicit error panels and runtime bar charts saved to {PLOTS_DIR}")
