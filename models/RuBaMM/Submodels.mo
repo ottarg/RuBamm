@@ -41,4 +41,28 @@ package Submodels
     sto_surf = c_s_surf / c_max;
   end SphericalParticle;
 
+  function j0_butler_volmer
+    "Symmetric Butler-Volmer exchange current density [A/m^2]"
+    input Real m_ref "Reaction rate constant [(A/m^2)(m^3/mol)^1.5]";
+    input Real c_e "Electrolyte concentration [mol/m^3]";
+    input Real c_s_surf "Surface solid concentration [mol/m^3]";
+    input Real c_s_max "Maximum solid concentration [mol/m^3]";
+    output Real j0 "Exchange current density [A/m^2]";
+  algorithm
+    j0 := m_ref * sqrt(c_e) * sqrt(c_s_surf) * sqrt(c_s_max - c_s_surf);
+  end j0_butler_volmer;
+
+  function eta_butler_volmer
+    "Inverse-sinh symmetric Butler-Volmer reaction overpotential [V]"
+    input Real j "Interfacial reaction current density [A/m^2]";
+    input Real j0 "Exchange current density [A/m^2]";
+    input Real T "Temperature [K]";
+    output Real eta "Reaction overpotential [V]";
+    protected
+    Real u;
+  algorithm
+    u := j / (2.0 * j0);
+    eta := (2.0 * Parameters.Marquis2019.R_gas * T / Parameters.Marquis2019.F) * log(u + sqrt(u ^ 2 + 1.0));
+  end eta_butler_volmer;
+
 end Submodels;
