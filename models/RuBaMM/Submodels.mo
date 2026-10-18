@@ -116,6 +116,10 @@ package Submodels
     Real a_j_n[Nn](each start = 0.0) "Volumetric interfacial current density in negative electrode [A/m^3]";
     Real a_j_p[Np](each start = 0.0) "Volumetric interfacial current density in positive electrode [A/m^3]";
 
+    // Electrolyte ionic current density at cell right/left faces [A/m^2] (for migration flux div(t_plus * i_e / F))
+    Real i_e_n_right[Nn](each start = 0.0) "Electrolyte current density at right face of negative electrode cells [A/m^2]";
+    Real i_e_p_left[Np](each start = 0.0) "Electrolyte current density at left face of positive electrode cells [A/m^2]";
+
     // Domain-averaged concentrations
     Real c_e_n_avg(start = P.c_e_init) "X-averaged negative electrolyte concentration [mol/m^3]";
     Real c_e_s_avg(start = P.c_e_init) "X-averaged separator electrolyte concentration [mol/m^3]";
@@ -154,27 +158,27 @@ package Submodels
       N_diff_p[i] = -(2.0 * D_eff_p[i] * D_eff_p[i + 1] / (D_eff_p[i] + D_eff_p[i + 1])) * (c_e_p[i + 1] - c_e_p[i]) / dx_p;
     end for;
 
-    // 3. Conservation equations: der(eps_c_e) = -div(N_diff) + (1 - t_plus) * a_j / F
-    // Negative electrode
-    der(eps_c_e_n[1]) = -(N_diff_n[1] - 0.0) / dx_n + (1.0 - P.t_plus) * a_j_n[1] / P.F;
+    // 3. Conservation equations: der(eps_c_e) = -div(N_diff + t_plus * i_e / F) + a_j / F
+    // Negative electrode (left boundary i_e = 0)
+    der(eps_c_e_n[1]) = -(N_diff_n[1] - 0.0) / dx_n + (a_j_n[1] - P.t_plus * (i_e_n_right[1] - 0.0) / dx_n) / P.F;
     for i in 2:(Nn - 1) loop
-      der(eps_c_e_n[i]) = -(N_diff_n[i] - N_diff_n[i - 1]) / dx_n + (1.0 - P.t_plus) * a_j_n[i] / P.F;
+      der(eps_c_e_n[i]) = -(N_diff_n[i] - N_diff_n[i - 1]) / dx_n + (a_j_n[i] - P.t_plus * (i_e_n_right[i] - i_e_n_right[i - 1]) / dx_n) / P.F;
     end for;
-    der(eps_c_e_n[Nn]) = -(N_diff_ns - N_diff_n[Nn - 1]) / dx_n + (1.0 - P.t_plus) * a_j_n[Nn] / P.F;
+    der(eps_c_e_n[Nn]) = -(N_diff_ns - N_diff_n[Nn - 1]) / dx_n + (a_j_n[Nn] - P.t_plus * (i_e_n_right[Nn] - i_e_n_right[Nn - 1]) / dx_n) / P.F;
 
-    // Separator (zero reaction source)
+    // Separator (zero reaction source, uniform i_e across separator faces so div(i_e) = 0)
     der(eps_c_e_s[1]) = -(N_diff_s[1] - N_diff_ns) / dx_s;
     for i in 2:(Ns - 1) loop
       der(eps_c_e_s[i]) = -(N_diff_s[i] - N_diff_s[i - 1]) / dx_s;
     end for;
     der(eps_c_e_s[Ns]) = -(N_diff_sp - N_diff_s[Ns - 1]) / dx_s;
 
-    // Positive electrode
-    der(eps_c_e_p[1]) = -(N_diff_p[1] - N_diff_sp) / dx_p + (1.0 - P.t_plus) * a_j_p[1] / P.F;
+    // Positive electrode (right boundary i_e = 0)
+    der(eps_c_e_p[1]) = -(N_diff_p[1] - N_diff_sp) / dx_p + (a_j_p[1] - P.t_plus * (i_e_p_left[2] - i_e_p_left[1]) / dx_p) / P.F;
     for i in 2:(Np - 1) loop
-      der(eps_c_e_p[i]) = -(N_diff_p[i] - N_diff_p[i - 1]) / dx_p + (1.0 - P.t_plus) * a_j_p[i] / P.F;
+      der(eps_c_e_p[i]) = -(N_diff_p[i] - N_diff_p[i - 1]) / dx_p + (a_j_p[i] - P.t_plus * (i_e_p_left[i + 1] - i_e_p_left[i]) / dx_p) / P.F;
     end for;
-    der(eps_c_e_p[Np]) = -(0.0 - N_diff_p[Np - 1]) / dx_p + (1.0 - P.t_plus) * a_j_p[Np] / P.F;
+    der(eps_c_e_p[Np]) = -(0.0 - N_diff_p[Np - 1]) / dx_p + (a_j_p[Np] - P.t_plus * (0.0 - i_e_p_left[Np]) / dx_p) / P.F;
 
     // 4. Domain averages
     c_e_n_avg = sum(c_e_n) / Nn;
