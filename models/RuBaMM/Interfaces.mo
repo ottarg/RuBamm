@@ -63,4 +63,39 @@ package Interfaces
     v = R * i;
   end Resistor;
 
+  model CCCVCycler
+    "Acausal 5-stage Battery Cycler: (1) CC Discharge -> (2) Rest -> (3) CC Charge -> (4) CV Hold -> (5) Rest"
+    extends TwoPin;
+    parameter Real I_dis = 0.680616 "Stage 1: Constant discharge current [A]";
+    parameter Real V_min = 3.6 "Stage 1 cutoff: Minimum discharge voltage [V]";
+    parameter Real t_rest1 = 300.0 "Stage 2: Rest duration after discharge [s]";
+    parameter Real I_chg = 0.680616 "Stage 3: Constant charge current [A]";
+    parameter Real V_max = 4.0 "Stage 3/4: Charge target & CV hold voltage [V]";
+    parameter Real t_cv = 600.0 "Stage 4: CV hold duration (or until |i| <= I_cut) [s]";
+    parameter Real I_cut = 0.05 "Stage 4 cutoff: Minimum CV taper current magnitude [A]";
+
+    Integer stage(start = 1) "Active experiment stage (1..5)";
+    Real t_stage(start = 0.0) "Timestamp when current stage started [s]";
+  equation
+    when pre(stage) == 1 and v <= V_min then
+      stage = 2;
+      t_stage = time;
+    elsewhen pre(stage) == 2 and (time - pre(t_stage)) >= t_rest1 then
+      stage = 3;
+      t_stage = time;
+    elsewhen pre(stage) == 3 and v >= V_max then
+      stage = 4;
+      t_stage = time;
+    elsewhen pre(stage) == 4 and ((time - pre(t_stage)) >= t_cv or (-p.i) <= I_cut) then
+      stage = 5;
+      t_stage = time;
+    end when;
+
+    0.0 = if stage == 1 then (p.i - I_dis)
+          else if stage == 2 then (p.i - 0.0)
+          else if stage == 3 then (p.i - (-I_chg))
+          else if stage == 4 then (v - V_max)
+          else (p.i - 0.0);
+  end CCCVCycler;
+
 end Interfaces;

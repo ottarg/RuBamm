@@ -5,7 +5,7 @@
 ## Package Structure
 
 * [`models/RuBaMM/package.mo`](models/RuBaMM/package.mo) — Root `RuBaMM` Modelica package.
-* [`models/RuBaMM/Interfaces.mo`](models/RuBaMM/Interfaces.mo) — Acausal electrical connectors (`Pin`, `TwoPin`) and circuit components (`Ground`, `CurrentSource`, `PulseCurrentSource`, `VoltageSource`, `Resistor`).
+* [`models/RuBaMM/Interfaces.mo`](models/RuBaMM/Interfaces.mo) — Acausal electrical connectors (`Pin`, `TwoPin`) and circuit components (`Ground`, `CurrentSource`, `PulseCurrentSource`, `VoltageSource`, `Resistor`, `CCCVCycler`).
 * [`models/RuBaMM/EquivalentCircuit.mo`](models/RuBaMM/EquivalentCircuit.mo) — 1-RC `Thevenin` Equivalent Circuit Model with coupled lumped cell/jig thermal dynamics (`pybamm.equivalent_circuit.Thevenin`).
 * [`models/RuBaMM/Parameters.mo`](models/RuBaMM/Parameters.mo) — Standard `Marquis2019` Graphite/LiCoO2 physical constants, analytical Open-Circuit Potentials (`U_n`, `U_p`), and Capiglia electrolyte diffusivity/conductivity (`D_e`, `kappa_e`).
 * [`models/RuBaMM/Submodels.mo`](models/RuBaMM/Submodels.mo) — Reusable Finite Volume Method (FVM) electrochemical submodels:
@@ -16,8 +16,11 @@
   * `SPM` — Single Particle Model (`pybamm.lithium_ion.SPM`).
   * `SPMe` — Single Particle Model with Electrolyte (`pybamm.lithium_ion.SPMe`).
   * `DFN` — Full Doyle-Fuller-Newman / P2D nonlinear DAE model (`pybamm.lithium_ion.DFN`).
+* [`src/rubamm/experiment.py`](src/rubamm/experiment.py) — PyBaMM-style `Experiment` recipe parser and Modelica multi-stage cycler generator (`compile_experiment`).
 
-## Running Equivalence Tests
+---
+
+## Running Equivalence Tests & Generating Plots
 
 Activate the virtual environment and run the checkpoint `pytest` suite:
 
@@ -25,11 +28,47 @@ Activate the virtual environment and run the checkpoint `pytest` suite:
 .\.venv\Scripts\pytest -v
 ```
 
-### Checkpoints
+To regenerate all visual equivalence plots in [`docs/plots/`](docs/plots/):
 
-1. **Checkpoint 1** (`tests/test_cp1_interfaces_ecm.py`): Acausal electrical interfaces and `Thevenin` ECM vs `pybamm.equivalent_circuit.Thevenin`.
-2. **Checkpoint 2** (`tests/test_cp2_particle_ocp.py`): `Marquis2019` OCP/electrolyte functions and `SphericalParticle` FVM radial shells vs PyBaMM.
-3. **Checkpoint 3** (`tests/test_cp3_spm.py`): `RuBaMM.Cells.SPM` vs `pybamm.lithium_ion.SPM()` under constant-current and sinusoidal dynamic loads.
-4. **Checkpoint 4** (`tests/test_cp4_spme.py`): `RuBaMM.Cells.SPMe` and `Electrolyte1D` vs `pybamm.lithium_ion.SPMe()`.
-5. **Checkpoint 5** (`tests/test_cp5_dfn.py`): `RuBaMM.Cells.DFN` (coupled P2D nonlinear DAE) vs `pybamm.lithium_ion.DFN()`.
-6. **Checkpoint 6** (`tests/test_cp6_acausal_coupling.py`): Acausal subsystem coupling of `DFN` and `SPM` cells with external `VoltageSource`, `Resistor` loads, and parallel multi-cell pack balancing.
+```powershell
+.\.venv\Scripts\python scripts/generate_comparison_plots.py
+```
+
+---
+
+## Visual Equivalence Benchmarks (PyBaMM vs. RuBaMM)
+
+### Checkpoint 1: Acausal Interfaces & Thevenin 1-RC Equivalent Circuit Model
+Compares `RuBaMM.EquivalentCircuit.Thevenin` against `pybamm.equivalent_circuit.Thevenin()` under 1C constant-current discharge and sinusoidal dynamic current profiles (`tests/test_cp1_interfaces_ecm.py`).
+
+![Checkpoint 1: Thevenin ECM Comparison](docs/plots/cp1_thevenin_ecm.png)
+
+### Checkpoint 2: `Marquis2019` Functions & 1D Spherical Particle FVM
+Compares `RuBaMM.Parameters.Marquis2019` open-circuit potentials (`U_n`, `U_p`), Capiglia electrolyte transport (`D_e`, `kappa_e`), and `RuBaMM.Submodels.SphericalParticle` radial FVM shells against PyBaMM (`tests/test_cp2_particle_ocp.py`).
+
+![Checkpoint 2: Particle & OCP Comparison](docs/plots/cp2_particle_ocp.png)
+
+### Checkpoint 3: Single Particle Model (`SPM`)
+Compares `RuBaMM.Cells.SPM` against `pybamm.lithium_ion.SPM()` across a 1C discharge and a dynamic sinusoidal load (`tests/test_cp3_spm.py`).
+
+![Checkpoint 3: SPM Comparison](docs/plots/cp3_spm.png)
+
+### Checkpoint 4: Single Particle Model with Electrolyte (`SPMe`)
+Compares `RuBaMM.Cells.SPMe` and `RuBaMM.Submodels.Electrolyte1D` against `pybamm.lithium_ion.SPMe()` across terminal voltage, domain-averaged concentrations, spatial electrolyte profiles $c_e(x, t)$, and electrolyte overpotentials (`tests/test_cp4_spme.py`).
+
+![Checkpoint 4: SPMe Comparison](docs/plots/cp4_spme.png)
+
+### Checkpoint 5: Full Doyle-Fuller-Newman (`DFN` / P2D) Model
+Compares the coupled nonlinear DAE `RuBaMM.Cells.DFN` against `pybamm.lithium_ion.DFN()` on terminal voltage, spatial electrolyte concentrations $c_e(x, t)$, spatial potentials $\phi_e(x, t)$, and interfacial Butler-Volmer reaction current densities $j(x, t)$ (`tests/test_cp5_dfn.py`).
+
+![Checkpoint 5: DFN Comparison](docs/plots/cp5_dfn.png)
+
+### Checkpoint 6: Acausal Circuit & Multi-Cell Pack Coupling
+Demonstrates acausal coupling of unmodified `RuBaMM.Cells.DFN` and `RuBaMM.Cells.SPM` components to external `VoltageSource` (constant-voltage current taper), passive `Resistor` loads, and 2-cell parallel pack self-balancing (`tests/test_cp6_acausal_coupling.py`).
+
+![Checkpoint 6: Acausal Coupling Comparison](docs/plots/cp6_acausal_coupling.png)
+
+### Checkpoint 7: PyBaMM-Style `Experiment` Recipes (Multi-Stage CCCV Cycling)
+Compares `rubamm.Experiment` / `compile_experiment` against `pybamm.Experiment` for multi-stage human-readable recipes (`["Discharge at 1C until 3.6 V", "Rest for 300 seconds", "Charge at 1C until 4.0 V", "Hold at 4.0 V for 600 seconds"]`) on both `SPM` and `DFN` (`tests/test_cp7_experiment.py`).
+
+![Checkpoint 7: Experiment CCCV Comparison](docs/plots/cp7_experiment_cccv.png)
