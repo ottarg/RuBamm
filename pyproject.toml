@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rubamm"
+version = "0.1.0"
+description = "RuBaMM: Porting and bridging PyBaMM battery models with the Rumoca Modelica compiler"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "rumoca>=0.10.2",
+    "pybamm>=26.10.1.0",
+    "matplotlib>=3.10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
